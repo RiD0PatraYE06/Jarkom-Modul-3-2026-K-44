@@ -800,35 +800,160 @@ cat /etc/resolv.conf
 
 ---
 
-## Soal 6: XXX
+## Soal 6: Konfigurasi DHCP Static Lease (Fixed Address VIP) untuk Kugisaki
 
 ### Ringkasan Soal
-xxx
+Mengonfigurasi reservasi alamat IP tetap (*Static Lease / Fixed Address*) pada DHCP Server `tengen` untuk client `kugisaki` sebagai personel VIP. Reservasi dilakukan berdasarkan entri MAC Address fisik interface `eth0` milik `kugisaki` untuk mengalokasikan IP spesifik `192.233.3.99`. Dipastikan alamat IP `192.233.3.99` berada di luar rentang pool dinamis Network 3 (*short lease* `192.233.3.10`–`192.233.3.89` dan *long lease* `192.233.3.100`–`192.233.3.199`). Pengujian dilakukan dengan memperbarui lease pada client `kugisaki` untuk membuktikan perolehan alamat IP statis yang telah didedikasikan.
 
 ---
 
 ### Apa Saja yang Harus Kita Lakukan?
-1. xxx
+1. Mengidentifikasi MAC Address fisik interface `eth0` pada client `kugisaki` menggunakan perintah `ip link show eth0` (`02:42:7b:ca:88:00`).
+2. Menambahkan deklarasi blok `host kugisaki_vip` pada file `/etc/dhcp/dhcpd.conf` di node `tengen` dengan parameter `hardware ethernet 02:42:7b:ca:88:00;` dan `fixed-address 192.233.3.99;`.
+3. Memastikan IP `192.233.3.99` berada di celah antara *short lease pool* dan *long lease pool* agar tidak bentrok dengan alokasi IP dinamis client lain.
+4. Membuat skrip otomatisasi `/root/soal-06.sh` pada node `tengen` dan menambahkan pemanggilannya pada file `/etc/network/interfaces`.
+5. Memvalidasi konfigurasi dengan `dhcpd -t -cf /etc/dhcp/dhcpd.conf` dan merestart service `isc-dhcp-server`.
+6. Memperbarui permintaan lease pada client `kugisaki` menggunakan perintah `ifdown eth0 && ifup eth0` lalu mengecek alamat IP yang diterima menggunakan perintah `ip a`.
 
 ---
 
 ### Skrip Apa Saja yang Kita Gunakan?
+**1. Skrip Otomatisasi Static Lease VIP Kugisaki di Node `tengen` (`/root/soal-06.sh`)**
 ```bash
+#!/bin/bash
+# ========================================================
+# Script Soal 6 - Setup Static Lease VIP kugisaki (tengen)
+# Kelompok: K44 | Prefix: 192.233 | Domain: k44.com
+# ========================================================
 
+# MAC Address Client Network 3
+MAC_INO="02:42:10:24:ba:00"
+MAC_KUSAKABE="02:42:06:f2:a9:00"
+MAC_MIWA="02:42:e2:8b:19:00"
+
+# MAC Address VIP kugisaki
+MAC_KUGISAKI="02:42:7b:ca:88:00"
+
+cat <<EOF > /etc/dhcp/dhcpd.conf
+authoritative;
+default-lease-time 600;
+max-lease-time 7200;
+
+# --- CLASS DIVISI A (NETWORK 2 - SOAL 4) ---
+class "pool1_dev" {
+    match if hardware = 1:02:42:47:97:d1:00 or hardware = 1:02:42:bb:96:e3:00;
+}
+
+class "pool2_support" {
+    match if hardware = 1:02:42:43:f9:6b:00 or hardware = 1:02:42:7a:09:9a:00;
+}
+
+# --- CLASS DIVISI B (NETWORK 3 - SOAL 5) ---
+class "short_lease_class" {
+    match if hardware = 1:$MAC_INO or hardware = 1:$MAC_KUSAKABE;
+}
+
+class "long_lease_class" {
+    match if hardware = 1:$MAC_MIWA;
+}
+
+# --- STATIC LEASE VIP (NETWORK 3 - SOAL 6) ---
+host kugisaki_vip {
+    hardware ethernet $MAC_KUGISAKI;
+    fixed-address 192.233.3.99;
+}
+
+# Subnet Lokal Network 4 (Data Center)
+subnet 192.233.4.0 netmask 255.255.255.0 {
+    option routers 192.233.4.1;
+    option broadcast-address 192.233.4.255;
+}
+
+# Subnet Network 2 (Divisi A)
+subnet 192.233.2.0 netmask 255.255.255.0 {
+    option routers 192.233.2.1;
+    option broadcast-address 192.233.2.255;
+
+    pool {
+        allow members of "pool1_dev";
+        range 192.233.2.10 192.233.2.35;
+    }
+
+    pool {
+        allow members of "pool2_support";
+        range 192.233.2.70 192.233.2.95;
+    }
+}
+
+# Subnet Network 3 (Divisi B)
+subnet 192.233.3.0 netmask 255.255.255.0 {
+    option routers 192.233.3.1;
+    option broadcast-address 192.233.3.255;
+
+    option domain-name-servers 192.233.1.2, 192.233.1.3;
+    option domain-name "k44.com";
+    option domain-search "k44.com";
+
+    # Pool Short Lease (ino & kusakabe)
+    pool {
+        allow members of "short_lease_class";
+        range 192.233.3.10 192.233.3.89;
+        default-lease-time 1800;
+        max-lease-time 1800;
+    }
+
+    # Pool Long Lease (miwa)
+    pool {
+        allow members of "long_lease_class";
+        range 192.233.3.100 192.233.3.199;
+        default-lease-time 43200;
+        max-lease-time 43200;
+    }
+}
+EOF
+
+# Validasi & Restart Service
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server restart
+
+echo "[OK] Setup Static Lease VIP Soal 6 berhasil di tengen."
+```
+
+**2. Konfigurasi `/etc/network/interfaces` di Node `tengen`**
+```bash
+auto eth0
+iface eth0 inet static
+	address 192.233.4.10
+	netmask 255.255.255.0
+	gateway 192.233.4.1
+
+	up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+	up bash /root/soal-02.sh
+	up bash /root/soal-04.sh
+	up bash /root/soal-05.sh
+	up bash /root/soal-06.sh
 ```
 
 ---
 
 ### Mekanisme Pengujian
+Eksekusi perintah berikut pada terminal client VIP `kugisaki`:
 ```bash
+# Memperbarui permintaan lease IP dari DHCP Server
+ifdown eth0 && ifup eth0
 
+# Memeriksa perolehan alamat IP statis yang dialokasikan
+ip a
 ```
 
 ---
 
 ### Hasil
 
-![]()
+![](./assets/06-kugisaki-vip.png)
+
+*Gambar 1: Hasil pengujian pada node `kugisaki` yang berhasil mendapatkan alokasi IP statis VIP `192.233.3.99/24` dari DHCP Server `tengen` sesuai dengan konfigurasi fixed-address.*
 
 ---
 
