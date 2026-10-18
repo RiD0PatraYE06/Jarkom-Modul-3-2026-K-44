@@ -957,35 +957,201 @@ ip a
 
 ---
 
-## Soal 7: XXX
+## Soal 7: Konfigurasi Global DHCP Options dan Verifikasi Keseluruhan Lease Client
 
 ### Ringkasan Soal
-xxx
+Mengonfigurasi *global DHCP options* pada DHCP Server `tengen` untuk mendistribusikan parameter DNS server (`192.233.1.2` dan `192.233.1.3`) serta domain search/domain name (`k44.com`) secara menyeluruh ke seluruh subnet. Melakukan verifikasi menyeluruh terhadap parameter jaringan (alamat IP, subnet mask `/24`, default gateway, routing, dan DNS resolver) pada seluruh client Divisi A (`itadori`, `fushiguro`, `zenin`, `okkotsu`) dan Divisi B (`ino`, `kusakabe`, `miwa`, `kugisaki`). Mengonfirmasi keabsahan entri sewa alamat pada berkas `/var/lib/dhcp/dhcpd.leases` di server `tengen` untuk memastikan tidak ada konflik IP, overlapping, maupun alokasi di luar batasan kebijakan pool.
 
 ---
 
 ### Apa Saja yang Harus Kita Lakukan?
-1. xxx
+1. Menambahkan *global options* pada bagian teratas file `/etc/dhcp/dhcpd.conf` di node `tengen`, mencakup `option domain-name-servers 192.233.1.2, 192.233.1.3;`, `option domain-name "k44.com";`, dan `option domain-search "k44.com";`.
+2. Menyusun skrip otomatisasi kumulatif final `/root/soal-07.sh` yang menggabungkan seluruh aturan alokasi dari Soal 2 hingga Soal 6.
+3. Memperbarui panggilan skrip otomatisasi di file `/etc/network/interfaces` pada node `tengen`.
+4. Mengesekusi pembaharuan lease (`ifdown eth0 && ifup eth0`) pada seluruh node client di Network 2 (Divisi A) dan Network 3 (Divisi B).
+5. Memeriksa tabel *routing* (`ip route`) dan file resolver (`cat /etc/resolv.conf`) di sisi client untuk memastikan gateway dan DNS sudah terkonfigurasi dengan benar.
+6. Memeriksa isi berkas catatan sewa DHCP `/var/lib/dhcp/dhcpd.leases` pada node `tengen` untuk mencocokkan MAC Address fisik dengan penetapan IP dan durasi *lease* yang aktif.
 
 ---
 
 ### Skrip Apa Saja yang Kita Gunakan?
+**1. Skrip Otomatisasi Global DHCP Config & Final Verification di Node `tengen` (`/root/soal-07.sh`)**
 ```bash
+#!/bin/bash
+# ========================================================
+# Script Soal 7 - Global DHCP Config & Final Verification (tengen)
+# Kelompok: K44 | Prefix: 192.233 | Domain: k44.com
+# ========================================================
 
+# MAC Address Divisi A (Network 2)
+MAC_ITADORI="02:42:47:97:d1:00"
+MAC_FUSHIGURO="02:42:bb:96:e3:00"
+MAC_ZENIN="02:42:43:f9:6b:00"
+MAC_OKKOTSU="02:42:7a:09:9a:00"
+
+# MAC Address Divisi B (Network 3)
+MAC_INO="02:42:10:24:ba:00"
+MAC_KUSAKABE="02:42:06:f2:a9:00"
+MAC_MIWA="02:42:e2:8b:19:00"
+MAC_KUGISAKI="02:42:7b:ca:88:00"
+
+cat <<EOF > /etc/dhcp/dhcpd.conf
+authoritative;
+default-lease-time 600;
+max-lease-time 7200;
+
+# --- GLOBAL OPTIONS (SOAL 7: Dipakai oleh Divisi A & Divisi B) ---
+option domain-name-servers 192.233.1.2, 192.233.1.3;
+option domain-name "k44.com";
+option domain-search "k44.com";
+
+# --- CLASS DIVISI A (NETWORK 2 - SOAL 4) ---
+class "pool1_dev" {
+    match if hardware = 1:$MAC_ITADORI or hardware = 1:$MAC_FUSHIGURO;
+}
+
+class "pool2_support" {
+    match if hardware = 1:$MAC_ZENIN or hardware = 1:$MAC_OKKOTSU;
+}
+
+# --- CLASS DIVISI B (NETWORK 3 - SOAL 5) ---
+class "short_lease_class" {
+    match if hardware = 1:$MAC_INO or hardware = 1:$MAC_KUSAKABE;
+}
+
+class "long_lease_class" {
+    match if hardware = 1:$MAC_MIWA;
+}
+
+# --- STATIC LEASE VIP (NETWORK 3 - SOAL 6) ---
+host kugisaki_vip {
+    hardware ethernet $MAC_KUGISAKI;
+    fixed-address 192.233.3.99;
+}
+
+# Subnet Lokal Network 4 (Data Center)
+subnet 192.233.4.0 netmask 255.255.255.0 {
+    option routers 192.233.4.1;
+    option broadcast-address 192.233.4.255;
+}
+
+# Subnet Network 2 (Divisi A)
+subnet 192.233.2.0 netmask 255.255.255.0 {
+    option routers 192.233.2.1;
+    option broadcast-address 192.233.2.255;
+
+    # Pool 1 (Dev): 192.233.2.10 - 192.233.2.35
+    pool {
+        allow members of "pool1_dev";
+        range 192.233.2.10 192.233.2.35;
+    }
+
+    # Pool 2 (Support): 192.233.2.70 - 192.233.2.95
+    pool {
+        allow members of "pool2_support";
+        range 192.233.2.70 192.233.2.95;
+    }
+}
+
+# Subnet Network 3 (Divisi B)
+subnet 192.233.3.0 netmask 255.255.255.0 {
+    option routers 192.233.3.1;
+    option broadcast-address 192.233.3.255;
+
+    # Pool Short Lease (ino & kusakabe) - 30 Menit
+    pool {
+        allow members of "short_lease_class";
+        range 192.233.3.10 192.233.3.89;
+        default-lease-time 1800;
+        max-lease-time 1800;
+    }
+
+    # Pool Long Lease (miwa) - 12 Jam
+    pool {
+        allow members of "long_lease_class";
+        range 192.233.3.100 192.233.3.199;
+        default-lease-time 43200;
+        max-lease-time 43200;
+    }
+}
+EOF
+
+# Validasi & Restart
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server restart
+
+echo "[OK] DHCP Server Soal 7 berhasil dikonfigurasi di tengen."
+```
+
+**2. Konfigurasi `/etc/network/interfaces` di Node `tengen`**
+```bash
+auto eth0
+iface eth0 inet static
+	address 192.233.4.10
+	netmask 255.255.255.0
+	gateway 192.233.4.1
+
+	up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+	up bash /root/soal-02.sh
+	up bash /root/soal-04.sh
+	up bash /root/soal-05.sh
+	up bash /root/soal-06.sh
+	up bash /root/soal-07.sh
 ```
 
 ---
 
 ### Mekanisme Pengujian
+1. **Di Seluruh Client Divisi A & Divisi B**:
 ```bash
+# Minta dan perbarui lease IP
+ifdown eth0 && ifup eth0
 
+# Cek tabel routing dan default gateway
+ip route
+
+# Cek konfigurasi DNS nameserver dan search domain
+cat /etc/resolv.conf
+```
+
+2. **Di Node DHCP Server `tengen`**:
+```bash
+# Cek daftar aktif sewa IP DHCP
+cat /var/lib/dhcp/dhcpd.leases
 ```
 
 ---
 
 ### Hasil
 
-![]()
+![](./assets/07-itadori-fushiguro-zenin-okkotsu.png)
+
+*Gambar 1: Verifikasi perolehan IP dinamis pada seluruh client Divisi A (`itadori`: `192.233.2.11`, `fushiguro`: `192.233.2.10`, `zenin`: `192.233.2.71`, `okkotsu`: `192.233.2.70`) yang sesuai dengan pembagian Pool 1 & Pool 2.*
+
+![](./assets/07-ino-kusakabe-miwa-kugisaki.png)
+
+*Gambar 2: Verifikasi perolehan IP dinamis pada client Divisi B (`ino`: `192.233.3.10`, `kusakabe`: `192.233.3.11`, `miwa`: `192.233.3.100`, `kugisaki`: `192.233.3.99`) beserta durasi lease time masing-masing.*
+
+![](./assets/07-verifikasi-itadori-ino.png)
+
+*Gambar 3: Verifikasi detail routing table (`ip route`) dan konfigurasi resolver (`cat /etc/resolv.conf`) pada client `itadori` dan `ino` yang memperlihatkan gateway dan DNS options global (`192.233.1.2`, `192.233.1.3`, domain `k44.com`).*
+
+![](./assets/07-verifikasi-tengen-01.png)
+
+![](./assets/07-verifikasi-tengen-02.png)
+
+![](./assets/07-verifikasi-tengen-03.png)
+
+![](./assets/07-verifikasi-tengen-04.png)
+
+![](./assets/07-verifikasi-tengen-05.png)
+
+![](./assets/07-verifikasi-tengen-06.png)
+
+![](./assets/07-verifikasi-tengen-07.png)
+
+*Gambar 4 ~ 10: Verifikasi pangkalan data sewa `/var/lib/dhcp/dhcpd.leases` pada server `tengen` (rangkuman tampilan log 01 hingga 07) yang mencatat seluruh status sewa aktif (`binding state active`) untuk client Network 2 (`itadori`, `fushiguro`, `zenin`, `okkotsu`) dan Network 3 (`ino`, `kusakabe`, `miwa`, `kugisaki`) secara konsisten tanpa ada konflik IP.*
 
 ---
 
