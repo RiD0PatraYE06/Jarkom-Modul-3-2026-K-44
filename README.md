@@ -237,9 +237,7 @@ Mengonfigurasi router utama `jichi` agar interface `eth0` memperoleh IP WAN dari
 ---
 
 ### Skrip Apa Saja yang Kita Gunakan?
-
 **1. Konfigurasi `/etc/network/interfaces` di Node Router `jichi`**
-
 ```bash
 auto eth0
 iface eth0 inet dhcp
@@ -269,7 +267,6 @@ iface eth4 inet static
 ```
 
 **2. Skrip Otomatisasi IP Forwarding & NAT di Router `jichi` (`/root/soal-01.sh`)**
-
 ```bash
 #!/bin/bash
 
@@ -287,7 +284,6 @@ iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 
 ### Mekanisme Pengujian
 Jalankan tes konektivitas berikut di terminal host infrastruktur (contoh pada `utahime` dan `tengen`):
-
 ```bash
 # Ping ke IP gateway router jichi
 ping -c 3 192.233.1.1
@@ -310,7 +306,7 @@ ping -c 3 8.8.8.8
 
 ---
 
-## Soal 2: XXX
+## Soal 2: Konfigurasi Dasar DHCP Server Scope di Tengen
 
 ### Ringkasan Soal
 Mengonfigurasi service `isc-dhcp-server` pada node Data Center `tengen` (`192.233.4.10`) untuk mengelola pengalokasian IP dinamis. Mendeklarasikan Network 4 (`192.233.4.0/24`) sebagai subnet lokal tanpa pool dinamis untuk mencegah munculnya error *"No subnet declaration for eth0"*, serta menyiapkan deklarasi *scope* DHCP untuk Network 2 (`192.233.2.0/24`) dan Network 3 (`192.233.3.0/24`). Memvalidasi sintaks konfigurasi dan memastikan service `isc-dhcp-server` berjalan dengan status aktif.
@@ -329,7 +325,6 @@ Mengonfigurasi service `isc-dhcp-server` pada node Data Center `tengen` (`192.23
 
 ### Skrip Apa Saja yang Kita Gunakan?
 **1. Skrip Otomatisasi DHCP Server di Node `tengen` (`/root/soal-02.sh`)**
-
 ```bash
 #!/bin/bash
 # ========================================================
@@ -384,7 +379,6 @@ echo "[OK] Setup DHCP Server Soal 2 pada tengen selesai."
 ```
 
 **2. Konfigurasi `/etc/network/interfaces` di Node `tengen`**
-
 ```bash
 auto eth0
 iface eth0 inet static
@@ -400,7 +394,6 @@ iface eth0 inet static
 
 ### Mekanisme Pengujian
 Eksekusi perintah berikut pada terminal node **`tengen`**:
-
 ```bash
 # Validasi sintaks file konfigurasi dhcpd.conf
 dhcpd -t
@@ -500,7 +493,6 @@ iface eth4 inet static
 
 ### Mekanisme Pengujian
 Eksekusi perintah berikut pada terminal client Network 2 (`itadori`) dan Network 3 (`ino`):
-
 ```bash
 # Mengaktifkan interface jaringan client
 ifup eth0
@@ -523,35 +515,130 @@ ip a
 
 ---
 
-## Soal 4: XXX
+## Soal 4: Pembagian Class Pool DHCP Berdasarkan MAC Address pada Network 2 (Divisi A)
 
 ### Ringkasan Soal
-xxx
+Mengatur pembagian alokasi alamat IP dinamis pada Network 2 (Divisi A) menjadi dua *pool* terpisah dalam satu subnet yang sama. Menggunakan fitur *DHCP Class* berdasarkan pencocokan MAC Address fisik client. *Pool 1* (`192.233.2.10`–`192.233.2.35`) dialokasikan khusus untuk Tim Dev (`itadori` dan `fushiguro`), sedangkan *Pool 2* (`192.233.2.70`–`192.233.2.95`) dialokasikan khusus untuk Tim Support (`zenin` dan `okkotsu`). Rentang `192.233.2.36`–`192.233.2.69` dikosongkan dan dilarang dialokasikan.
 
 ---
 
 ### Apa Saja yang Harus Kita Lakukan?
-1. xxx
+1. Mengidentifikasi MAC Address fisik interface `eth0` dari masing-masing client di Divisi A (`itadori`, `fushiguro`, `zenin`, `okkotsu`) menggunakan perintah `ip link show eth0`.
+2. Mendefinisikan class `pool1_dev` pada file `/etc/dhcp/dhcpd.conf` di node `tengen` untuk mencocokkan MAC Address `itadori` (`02:42:47:97:d1:00`) dan `fushiguro` (`02:42:bb:96:e3:00`).
+3. Mendefinisikan class `pool2_support` pada file `/etc/dhcp/dhcpd.conf` di node `tengen` untuk mencocokkan MAC Address `zenin` (`02:42:43:f9:6b:00`) dan `okkotsu` (`02:42:7a:09:9a:00`).
+4. Mengonfigurasi blok `subnet 192.233.2.0 netmask 255.255.255.0` dengan menambahkan dua aturan `pool`:
+    * Pool 1: `allow members of "pool1_dev";` dengan `range 192.233.2.10 192.233.2.35;`
+    * Pool 2: `allow members of "pool2_support";` dengan `range 192.233.2.70 192.233.2.95;`
+5. Membuat skrip otomatisasi `/root/soal-04.sh` pada node `tengen` dan memperbarui panggilan skrip pada `/etc/network/interfaces`.
+6. Memperbarui perolehan lease pada keempat client Divisi A menggunakan perintah `ifdown eth0 && ifup eth0` lalu memverifikasi alokasi IP masing-masing menggunakan `ip a`.
 
 ---
 
 ### Skrip Apa Saja yang Kita Gunakan?
+**1. Skrip Otomatisasi Class Pool DHCP Network 2 di Node `tengen` (`/root/soal-04.sh`)**
 ```bash
+#!/bin/bash
+# ========================================================
+# Script Soal 4 - Setup DHCP Class Pool Network 2 (tengen)
+# Kelompok: K44 | Prefix: 192.233
+# ========================================================
 
+cat <<EOF > /etc/dhcp/dhcpd.conf
+authoritative;
+default-lease-time 600;
+max-lease-time 7200;
+
+# Class Pool 1 (Tim Dev: itadori & fushiguro)
+class "pool1_dev" {
+    match if (
+        substring(hardware, 1, 6) = 02:42:47:97:d1:00 or
+        substring(hardware, 1, 6) = 02:42:bb:96:e3:00
+    );
+}
+
+# Class Pool 2 (Tim Support: zenin & okkotsu)
+class "pool2_support" {
+    match if (
+        substring(hardware, 1, 6) = 02:42:43:f9:6b:00 or
+        substring(hardware, 1, 6) = 02:42:7a:09:9a:00
+    );
+}
+
+# Subnet Lokal Network 4 (Data Center)
+subnet 192.233.4.0 netmask 255.255.255.0 {
+    option routers 192.233.4.1;
+    option broadcast-address 192.233.4.255;
+}
+
+# Subnet Network 2 (Divisi A)
+subnet 192.233.2.0 netmask 255.255.255.0 {
+    option routers 192.233.2.1;
+    option broadcast-address 192.233.2.255;
+
+    # Pool 1: 192.233.2.10 - 192.233.2.35
+    pool {
+        allow members of "pool1_dev";
+        range 192.233.2.10 192.233.2.35;
+    }
+
+    # Pool 2: 192.233.2.70 - 192.233.2.95
+    pool {
+        allow members of "pool2_support";
+        range 192.233.2.70 192.233.2.95;
+    }
+}
+
+# Subnet Network 3 (Divisi B)
+subnet 192.233.3.0 netmask 255.255.255.0 {
+    option routers 192.233.3.1;
+    option broadcast-address 192.233.3.255;
+}
+EOF
+
+# Validasi & Restart
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server restart
+
+echo "[OK] DHCP Class Pool Soal 4 berhasil diperbarui di tengen."
+```
+
+**2. Konfigurasi `/etc/network/interfaces` di Node `tengen`**
+```bash
+auto eth0
+iface eth0 inet static
+	address 192.233.4.10
+	netmask 255.255.255.0
+	gateway 192.233.4.1
+
+	up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+	up bash /root/soal-02.sh
+	up bash /root/soal-04.sh
 ```
 
 ---
 
 ### Mekanisme Pengujian
+Eksekusi perintah berikut pada setiap terminal client Divisi A (`itadori`, `fushiguro`, `zenin`, `okkotsu`):
 ```bash
+# Memperbarui permintaan lease IP dari DHCP Server
+ifdown eth0 && ifup eth0
 
+# Memeriksa perolehan alamat IP dari pool yang sesuai
+ip a
 ```
 
 ---
 
 ### Hasil
 
-![]()
+![](./assets/04-itadori-fushiguro.png)
+
+*Gambar 1: Hasil pengujian pada `itadori` (mendapatkan IP `192.233.2.11`) dan `fushiguro` (mendapatkan IP `192.233.2.10`) yang terbukti berada dalam rentang Pool 1 Dev (`192.233.2.10`–`192.233.2.35`).*
+
+![](./assets/04-zenin-okkotsu.png)
+
+*Gambar 2: Hasil pengujian pada `zenin` (mendapatkan IP `192.233.2.71`) dan `okkotsu` (mendapatkan IP `192.233.2.70`) yang terbukti berada dalam rentang Pool 2 Support (`192.233.2.70`–`192.233.2.95`).*
 
 ---
 
