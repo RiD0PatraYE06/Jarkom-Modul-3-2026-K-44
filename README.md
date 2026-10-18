@@ -1209,39 +1209,215 @@ ifdown eth0 && ifup eth0
 
 ---
 
-## Soal 9: XXX
+## Soal 9: Pengujian Disrupsi dan Pemulihan Layanan DHCP Relay pada Router Jichi
 
 ### Ringkasan Soal
-xxx
+
+Menguji ketahanan dan peran *DHCP Relay Agent* pada router `jichi` dengan mensimulasikan pemutusan jalur relay melalui penghentian *service* `isc-dhcp-relay`. Memaksa client Network 2 (`itadori`) meminta *lease* baru untuk mengamati gejala kegagalan perolehan IP akibat paket *broadcast DISCOVER* tidak diteruskan ke Data Center `tengen` (`192.233.4.10`). Selanjutnya, memulihkan kembali *service* `isc-dhcp-relay` di `jichi` dan membuktikan bahwa client kembali berhasil memperoleh alokasi IP yang benar dari *pool* (`192.233.2.11`) beserta *default gateway* semula (`192.233.2.1`).
 
 ---
 
 ### Apa Saja yang Harus Kita Lakukan?
-1. xxx
+1. Menghentikan *service* DHCP Relay pada router `jichi` menggunakan perintah `service isc-dhcp-relay stop` untuk mensimulasikan gangguan jaringan.
+2. Memperbarui permintaan IP pada client Network 2 (`itadori`) menggunakan `ifdown eth0 && ifup eth0` dan mencatat respons kegagalan `udhcpc` (*failed to get a DHCP lease*).
+3. Memulihkan *service* DHCP Relay pada router `jichi` menggunakan perintah `service isc-dhcp-relay start`.
+4. Meminta ulang *lease* IP pada client `itadori` dengan perintah `ifdown eth0 && ifup eth0`.
+5. Memeriksa kembali alamat IP, subnet, dan tabel *routing* pada client `itadori` menggunakan perintah `ip a` dan `ip route`.
 
 ---
 
 ### Skrip Apa Saja yang Kita Gunakan?
 ```bash
+# 1. Di Router jichi: Menghentikan service DHCP Relay
+service isc-dhcp-relay stop
 
+# 2. Di Client (itadori): Meminta lease IP baru saat relay mati
+ifdown eth0 && ifup eth0
+
+# 3. Di Router jichi: Memulihkan kembali service DHCP Relay
+service isc-dhcp-relay start
+
+# 4. Di Client (itadori): Meminta ulang lease IP setelah relay aktif kembali
+ifdown eth0 && ifup eth0
+ip a
+ip route
 ```
 
 ---
 
 ### Mekanisme Pengujian
-```bash
+1. Hentikan layanan relay di router **`jichi`** dengan menjalankan `service isc-dhcp-relay stop`.
+2. Jalankan `ifdown eth0 && ifup eth0` di client **`itadori`** (Network 2) atau **`ino`** (Network 3), lalu amati proses `udhcpc` yang gagal mendapatkan alokasi alamat (*no lease*).
+3. Jalankan `service isc-dhcp-relay start` di router **`jichi`** untuk memulihkan koneksi.
+4. Ulangi perintah `ifdown eth0 && ifup eth0` di client **`itadori`**, kemudian eksekusi `ip a` serta `ip route` untuk memastikan alamat IP dan *default gateway* kembali diperoleh secara normal.
 
+---
+
+### Hasil
+
+![](./assets/09-relay-down.png)
+
+*Gambar 1: Hasil simulasi saat service isc-dhcp-relay di-stop pada router jichi. Client `itadori` terus-menerus mengirimkan paket broadcast DISCOVER dan berakhir dengan pesan error `udhcpc: failed to get a DHCP lease`.*
+
+![](./assets/09-relay-done.png)
+
+![](./assets/09-relay-recover.png)
+
+*Gambar 2: Hasil pengujian setelah service isc-dhcp-relay di-start kembali pada router jichi. Client `itadori` berhasil memperoleh kembali alokasi IP `192.233.2.11/24` dari DHCP Server `tengen` (`192.233.4.10`) dengan default gateway `192.233.2.1`.*
+
+---
+
+## Soal 10: Konfigurasi Persistensi Autostart Service DHCP Server dan DHCP Relay Pasca Reboot
+
+### Ringkasan Soal
+Mengonfigurasi mekanisme *autostart* dan persistensi layanan DHCP pada node Data Center `tengen` (`isc-dhcp-server`) dan router `jichi` (`isc-dhcp-relay`) agar seluruh konfigurasi layanan serta *IP forwarding* tetap aktif secara otomatis pasca-*reboot* tanpa memerlukan intervensi manual. Konfigurasi direalisasikan melalui eksekusi skrip otomatisasi `/root/soal-10.sh` yang dipanggil melalui arahan `up` pada berkas `/etc/network/interfaces` di masing-masing node. Pengujian dilakukan dengan memverifikasi status operasional layanan pasca-*reboot*, memeriksa perolehan alamat IP dinamis, durasi *lease*, dan *default gateway* pada client Network 2 (`itadori`) serta Network 3 (`ino`), serta membuktikan konektivitas jaringan dari client menuju server `tengen` (`192.233.4.10`).
+
+---
+
+### Apa Saja yang Harus Kita Lakukan?
+1. Membuat skrip `/root/soal-10.sh` di router `jichi` untuk memastikan parameter kernel `net.ipv4.ip_forward=1` diaktifkan dan layanan `isc-dhcp-relay` dijalankan secara otomatis.
+2. Memanggil skrip `/root/soal-10.sh` pada baris `up` di dalam file `/etc/network/interfaces` router `jichi`.
+3. Membuat skrip `/root/soal-10.sh` di node `tengen` untuk menjalankan skrip konfigurasi kumulatif (`/root/soal-07.sh`) dan mere-restart layanan `isc-dhcp-server`.
+4. Memanggil skrip `/root/soal-10.sh` pada baris `up` di dalam file `/etc/network/interfaces` node `tengen`.
+5. Melakukan *reboot* pada node `jichi` dan `tengen` untuk menguji skenario penyiapan ulang otomatis.
+6. Memeriksa status proses layanan pasca-*reboot* di `jichi` (`ps aux | grep dhcrelay`) dan status layanan di `tengen` (`service isc-dhcp-server status`).
+7. Memperbarui permintaan *lease* IP (`ifdown eth0 && ifup eth0`), memeriksa entri tabel *routing* (`ip route`), serta menguji konektivitas (`ping -c 4 192.233.4.10`) dari client `itadori` dan `ino` menuju server `tengen`.
+
+---
+
+### Skrip Apa Saja yang Kita Gunakan?
+**1. Skrip Persistensi DHCP Relay di Router `jichi` (`/root/soal-10.sh`)**
+```bash
+#!/bin/bash
+# ========================================================
+# Script Soal 10 - Autostart DHCP Relay (jichi)
+# Kelompok: K44 | Prefix: 192.233
+# ========================================================
+
+# 1. Pastikan IP Forwarding aktif
+sysctl -w net.ipv4.ip_forward=1
+
+# 2. Restart & pastikan service berjalan
+service isc-dhcp-relay restart
+
+echo "[OK] Persistensi & Autostart DHCP Relay Soal 10 di jichi aktif."
+```
+
+**2. Konfigurasi `/etc/network/interfaces` di Node Router `jichi`**
+```bash
+auto eth0
+iface eth0 inet dhcp
+	up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+auto eth1
+iface eth1 inet static
+	address 192.233.1.1
+	netmask 255.255.255.0
+
+auto eth2
+iface eth2 inet static
+	address 192.233.2.1
+	netmask 255.255.255.0
+
+auto eth3
+iface eth3 inet static
+	address 192.233.3.1
+	netmask 255.255.255.0
+
+auto eth4
+iface eth4 inet static
+	address 192.233.4.1
+	netmask 255.255.255.0
+
+	up bash /root/soal-01.sh
+	up bash /root/soal-03.sh
+	up bash /root/soal-10.sh
+```
+
+**3. Skrip Persistensi DHCP Server di Node `tengen` (`/root/soal-10.sh`)**
+```bash
+#!/bin/bash
+# ========================================================
+# Script Soal 10 - Autostart DHCP Server (tengen)
+# Kelompok: K44 | Prefix: 192.233
+# ========================================================
+
+# 1. Jalankan ulang konfigurasi kumulatif terakhir (Soal 7)
+bash /root/soal-07.sh
+
+# 2. Restart & pastikan service berjalan
+service isc-dhcp-server restart
+
+echo "[OK] Persistensi & Autostart DHCP Server Soal 10 di tengen aktif."
+```
+
+**4. Konfigurasi `/etc/network/interfaces` di Node `tengen`**
+```bash
+auto eth0
+iface eth0 inet static
+	address 192.233.4.10
+	netmask 255.255.255.0
+	gateway 192.233.4.1
+
+	up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+	up bash /root/soal-02.sh
+	up bash /root/soal-04.sh
+	up bash /root/soal-05.sh
+	up bash /root/soal-06.sh
+	up bash /root/soal-07.sh
+	up bash /root/soal-10.sh
+```
+
+---
+
+### Mekanisme Pengujian
+1. **Di Router `jichi` dan Node `tengen` Pasca Reboot**:
+```bash
+# Di jichi: Cek status proses dhcrelay
+service isc-dhcp-relay status
+ps aux | grep dhcrelay
+
+# Di tengen: Cek status service isc-dhcp-server
+service isc-dhcp-server status
+```
+
+2. **Di Client `itadori` (Network 2) dan `ino` (Network 3)**:
+```bash
+# Minta ulang alokasi IP dinamis
+ifdown eth0 && ifup eth0
+
+# Periksa alamat IP, netmask, dan default gateway
+ip a
+ip route
+
+# Pengujian konektivitas ping ke DHCP Server tengen
+ping -c 4 192.233.4.10
 ```
 
 ---
 
 ### Hasil
 
-![]()
+![](./assets/10-persistensi-autostart.png)
+
+*Gambar 1: Output terminal saat interface dinyalakan pada node `jichi` dan `tengen` pasca reboot, menunjukkan eksekusi skrip `soal-10.sh` yang mengaktifkan kembali layanan DHCP Relay dan DHCP Server secara otomatis.*
+
+![](./assets/10-service-pasca-reboot.png)
+
+*Gambar 2: Verifikasi status layanan pasca reboot. Terlihat daemon `dhcrelay` berjalan aktif pada router `jichi` dan status `isc-dhcp-server` di node `tengen` menunjukkan status `dhcpd is running`.*
+
+![](./assets/10-cek-ip-lease.png)
+
+*Gambar 3: Hasil verifikasi perolehan IP dan routing pada client `itadori` (mendapatkan IP `192.233.2.11` dari Pool 1 Dev) dan client `ino` (mendapatkan IP `192.233.3.10` dengan short lease time 1800 detik) pasca reboot.*
+
+![](./assets/10-ping-client.png)
+
+*Gambar 4: Pengujian konektivitas dari client `itadori` dan `ino` menuju DHCP Server `tengen` (`192.233.4.10`) pasca reboot yang sukses dengan 0% packet loss.*
 
 ---
 
-## Soal 10: XXX
+## Soal 11: XXX
 
 ### Ringkasan Soal
 xxx
