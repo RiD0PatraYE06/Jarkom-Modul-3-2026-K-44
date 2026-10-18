@@ -419,35 +419,107 @@ service isc-dhcp-server status
 
 ---
 
-## Soal 3: XXX
+## Soal 3: Konfigurasi DHCP Relay pada Router Jichi
 
 ### Ringkasan Soal
-xxx
+Mengonfigurasi router `jichi` sebagai *DHCP Relay Agent* untuk meneruskan *broadcast request* DHCP dari Network 2 (Divisi A melalui interface `eth2`) dan Network 3 (Divisi B melalui interface `eth3`) menuju DHCP Server `tengen` (`192.233.4.10`) yang terhubung pada interface `eth4`. Membuktikan bahwa client dari kedua subnet (seperti `itadori` di Network 2 dan `ino` di Network 3) berhasil memperoleh alokasi alamat IP dinamis secara otomatis melalui *relay*.
 
 ---
 
 ### Apa Saja yang Harus Kita Lakukan?
-1. xxx
+1. Menginstal paket `isc-dhcp-relay` pada router `jichi`.
+2. Mengonfigurasi file `/etc/default/isc-dhcp-relay` dengan menetapkan `SERVERS="192.233.4.10"` (IP `tengen`) serta menentukan interface listener `INTERFACES="eth2 eth3 eth4"`.
+3. Memastikan *IPv4 Forwarding* (`net.ipv4.ip_forward=1`) tetap aktif pada router `jichi`.
+4. Membuat skrip otomatisasi `/root/soal-03.sh` pada router `jichi` dan meregistrasikannya ke dalam file `/etc/network/interfaces` dengan perintah `up bash /root/soal-03.sh`.
+5. Melakukan pengujian pada client `itadori` (Network 2) dan `ino` (Network 3) menggunakan perintah `ifup eth0` lalu mengecek perolehan IP dinamis menggunakan `ip a`.
 
 ---
 
 ### Skrip Apa Saja yang Kita Gunakan?
+**1. Skrip Otomatisasi DHCP Relay di Router `jichi` (`/root/soal-03.sh`)**
 ```bash
+#!/bin/bash
+# ========================================================
+# Script Soal 3 - Setup DHCP Relay (jichi)
+# Kelompok: K44 | Prefix: 192.233
+# ========================================================
 
+# 1. Update paket & Install isc-dhcp-relay
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y isc-dhcp-relay
+
+# 2. Konfigurasi /etc/default/isc-dhcp-relay
+# SERVERS: Alamat IP DHCP Server (tengen)
+# INTERFACES: Interface client (eth2, eth3) + interface menuju server (eth4)
+cat <<EOF > /etc/default/isc-dhcp-relay
+SERVERS="192.233.4.10"
+INTERFACES="eth2 eth3 eth4"
+OPTIONS=""
+EOF
+
+# 3. Pastikan IP Forwarding tetap aktif
+sysctl -w net.ipv4.ip_forward=1
+
+# 4. Restart service DHCP Relay
+service isc-dhcp-relay restart
+
+echo "[OK] Setup DHCP Relay Soal 3 pada jichi selesai."
+```
+
+**2. Konfigurasi `/etc/network/interfaces` di Node Router `jichi`**
+```bash
+auto eth0
+iface eth0 inet dhcp
+	up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+auto eth1
+iface eth1 inet static
+	address 192.233.1.1
+	netmask 255.255.255.0
+
+auto eth2
+iface eth2 inet static
+	address 192.233.2.1
+	netmask 255.255.255.0
+
+auto eth3
+iface eth3 inet static
+	address 192.233.3.1
+	netmask 255.255.255.0
+
+auto eth4
+iface eth4 inet static
+	address 192.233.4.1
+	netmask 255.255.255.0
+
+	up bash /root/soal-01.sh
+	up bash /root/soal-03.sh
 ```
 
 ---
 
 ### Mekanisme Pengujian
-```bash
+Eksekusi perintah berikut pada terminal client Network 2 (`itadori`) dan Network 3 (`ino`):
 
+```bash
+# Mengaktifkan interface jaringan client
+ifup eth0
+
+# Memeriksa perolehan alamat IP dari DHCP Server melalui relay
+ip a
 ```
 
 ---
 
 ### Hasil
 
-![]()
+![](./assets/03-tes-di-itadori.png)
+
+*Gambar 1: Hasil pengujian pada node `itadori` (Network 2) yang berhasil mendapatkan alokasi IP dinamis `192.233.2.2/24` dari DHCP Server via relay `jichi`.*
+
+![](./assets/03-tes-di-ino.png)
+
+*Gambar 2: Hasil pengujian pada node `ino` (Network 3) yang berhasil mendapatkan alokasi IP dinamis `192.233.3.2/24` dari DHCP Server via relay `jichi`.*
 
 ---
 
