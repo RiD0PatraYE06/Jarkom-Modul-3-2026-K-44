@@ -1155,35 +1155,57 @@ cat /var/lib/dhcp/dhcpd.leases
 
 ---
 
-## Soal 8: XXX
+Berikut adalah draf laporan untuk **Soal 8** sesuai dengan template Markdown yang digunakan:
+
+---
+
+## Soal 8: Analisis Packet Capture Transaksi DHCP (DORA) dan Verifikasi Field Gateway IP (giaddr)
 
 ### Ringkasan Soal
-xxx
+Melakukan penangkapan paket (*packet capture*) transaksi DHCP pada node Data Center `tengen` (`192.233.4.10`) menggunakan utilitas `tcpdump` saat client Network 3 (`ino`) memperbarui sewa IP. Menganalisis alur empat tahap transaksi DHCP (DHCPDISCOVER, DHCPOFFER, DHCPREQUEST, DHCPACK) serta mengidentifikasi parameter utama dalam *header* paket, meliputi alamat DHCP server (`192.233.4.10`), alamat IP yang dialokasikan (`192.233.3.10`), durasi *lease time* (1800 detik), serta nilai *field* `giaddr` (Gateway IP). Memastikan nilai `giaddr` tercatat sebesar `192.233.3.1` sesuai dengan alamat interface `eth3` router `jichi` yang bertindak sebagai DHCP Relay Agent untuk Network 3.
 
 ---
 
 ### Apa Saja yang Harus Kita Lakukan?
-1. xxx
+1. Menjalankan perintah `tcpdump` dengan mode *verbose* pada interface `eth0` node `tengen` untuk memantau paket pada UDP port 67 dan port 68 (`udp port 67 or port 68`).
+2. Memicu proses permohonan *lease* IP baru dari client Network 3 (`ino`) dengan mengeksekusi perintah `ifdown eth0 && ifup eth0`.
+3. Menganalisis alur transmisi paket BOOTP/DHCP yang ditangkap oleh `tcpdump` pada node `tengen`.
+4. Memeriksa detail opsi dan parameter paket DHCP ACK/Request pada terminal `tengen`:
+    * **Server-ID (54)**: `192.233.4.10` (IP DHCP Server `tengen`)
+    * **Your-IP / Requested-IP**: `192.233.3.10` (IP yang diberikan kepada `ino`)
+    * **Lease-Time (51)**: `1800` detik (30 menit, sesuai kebijakan *short lease*)
+    * **Gateway-IP (giaddr)**: `192.233.3.1` (IP interface `eth3` router `jichi`)
+5. Memverifikasi bahwa nilai `giaddr` yang terbaca pada *packet capture* sudah sesuai dengan IP gateway subnet asal permintaan (`192.233.3.1`).
 
 ---
 
 ### Skrip Apa Saja yang Kita Gunakan?
+**1. Perintah Packet Capture di Node DHCP Server (`tengen`)**
 ```bash
+# Menangkap paket DHCP (UDP port 67 & 68) dengan detail verbose dan nomor MAC
+tcpdump -i eth0 -nevv "udp port 67 or port 68"
+```
 
+**2. Perintah Renewal Lease di Node Client (`ino` / `itadori`)**
+```bash
+# Memicu ulang permohonan IP dinamis (DISCOVER -> OFFER -> REQUEST -> ACK)
+ifdown eth0 && ifup eth0
 ```
 
 ---
 
 ### Mekanisme Pengujian
-```bash
-
-```
+1. Buka terminal node **`tengen`**, lalu jalankan perintah `tcpdump -i eth0 -nevv "udp port 67 or port 68"`.
+2. Buka terminal client **`ino`** (Network 3) atau **`itadori`** (Network 2), lalu eksekusi `ifdown eth0 && ifup eth0`.
+3. Amati keluaran log `tcpdump` di terminal `tengen` untuk mengonfirmasi bahwa seluruh parameter (`Server-ID`, `Your-IP`, `Lease-Time`, dan `Gateway-IP / giaddr`) muncul dengan benar sesuai dengan spesifikasi protokol.
 
 ---
 
 ### Hasil
 
-![]()
+![](./assets/08-packet-capture.png)
+
+*Gambar 1: Hasil packet capture menggunakan tcpdump pada node `tengen` saat client `ino` melakukan renewal lease. Terlihat paket DHCP Request dan ACK dengan alamat server `192.233.4.10`, Your-IP `192.233.3.10`, Lease-Time 1800 detik, serta nilai Gateway-IP (giaddr) `192.233.3.1` yang berasal dari interface relay `jichi`.*
 
 ---
 
