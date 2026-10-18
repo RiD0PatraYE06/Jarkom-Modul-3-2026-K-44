@@ -1448,3 +1448,1786 @@ xxx
 ![]()
 
 ---
+
+## Soal 11
+
+#Di Node utahime
+
+cat > /root/soal-11.sh <<'SCRIPT'
+#!/bin/sh
+set -eu
+
+### Nameserver untuk persiapan instalasi paket
+printf 'nameserver 192.168.122.1\n' > /etc/resolv.conf
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y bind9 bind9-utils dnsutils
+
+### Konfigurasi dasar DNS Master
+cat > /etc/bind/named.conf.options <<'OPTIONS'
+options {
+    directory "/var/cache/bind";
+
+    listen-on { any; };
+    listen-on-v6 { any; };
+
+    recursion no;
+    allow-query { localhost; 192.233.0.0/16; };
+
+    dnssec-validation auto;
+};
+OPTIONS
+
+### Deklarasi zona utama
+cat > /etc/bind/named.conf.local <<'LOCAL'
+zone "jujutsu.k44.com" {
+    type master;
+    file "/etc/bind/db.jujutsu.k44.com";
+    allow-transfer { 192.233.1.3; };
+    also-notify { 192.233.1.3; };
+};
+LOCAL
+
+### Isi zona DNS
+cat > /etc/bind/db.jujutsu.k44.com <<'ZONE'
+$TTL 86400
+@ IN SOA utahime.jujutsu.k44.com. admin.jujutsu.k44.com. (
+    2026101301
+    3600
+    900
+    604800
+    86400
+)
+
+@         IN NS  utahime.jujutsu.k44.com.
+@         IN NS  shoko.jujutsu.k44.com.
+
+utahime   IN A   192.233.1.2
+shoko     IN A   192.233.1.3
+
+sync-test IN TXT "dns-zone-sync-k44-v1"
+ZONE
+
+### Validasi sebelum menjalankan layanan
+named-checkconf
+named-checkzone jujutsu.k44.com /etc/bind/db.jujutsu.k44.com
+
+### Terapkan konfigurasi
+service bind9 restart
+
+echo "Konfigurasi DNS Master selesai."
+SCRIPT
+
+chmod +x /root/soal-11.sh
+
+### jalankan
+bash /root/soal-11.sh
+#cek layanan
+service bind9 status
+#uji dns master
+dig @127.0.0.1 jujutsu.k44.com SOA
+
+
+### DI shoko
+
+cat > /etc/bind/named.conf.options <<'EOF'
+options {
+    directory "/var/cache/bind";
+    listen-on { any; };
+    listen-on-v6 { any; };
+    recursion no;
+    allow-query { localhost; 192.233.0.0/16; };
+    dnssec-validation auto;
+};
+EOF
+
+cat > /etc/bind/named.conf.local <<'EOF'
+zone "jujutsu.k44.com" {
+    type slave;
+    masters { 192.233.1.2; };
+    file "/var/cache/bind/db.jujutsu.k44.com";
+};
+EOF
+
+named-checkconf
+service named restart
+
+### uji transfer zone
+dig @127.0.0.1 jujutsu.k44.com SOA +short
+dig @127.0.0.1 jujutsu.k44.com NS +short
+
+#jalankan di utahime
+sed -i \
+  -e 's/2026101301/2026101302/' \
+  -e 's/dns-zone-sync-k44-v1/dns-zone-sync-k44-v2/' \
+  /etc/bind/db.jujutsu.k44.com
+
+named-checkzone jujutsu.k44.com /etc/bind/db.jujutsu.k44.com
+service named restart
+
+### di shoko
+
+dig @127.0.0.1 jujutsu.k44.com SOA +short
+dig @127.0.0.1 sync-test.jujutsu.k44.com TXT +short
+
+### verif dari client
+
+dig @192.233.1.2 jujutsu.k44.com SOA +short
+dig @192.233.1.3 jujutsu.k44.com SOA +short
+dig @192.233.1.3 sync-test.jujutsu.k44.com TXT +short
+
+---
+ 
+## soal 12
+
+#Di Node utahime
+
+
+cat > /root/soal-12.sh <<'EOF'
+#!/bin/sh
+set -eu
+
+DOMAIN="jujutsu.k44.com"
+GOJO_IP="192.233.1.4"
+GOJO_LAST="${GOJO_IP##*.}"
+ZONE="/etc/bind/db.jujutsu.k44.com"
+REV_ZONE="1.233.192.in-addr.arpa"
+REV_FILE="/etc/bind/db.192.233.1"
+BACKUP="/root/soal-12"
+
+case "$GOJO_IP" in
+    192.233.1.*) ;;
+    *)
+        echo "ERROR: IP Gojo harus berada di Network 1 (192.233.1.0/24)."
+        exit 1
+        ;;
+esac
+
+mkdir -p "$BACKUP"
+
+# Cadangkan konfigurasi aktif sebelum perubahan.
+for f in named.conf.options named.conf.local db.jujutsu.k44.com; do
+    if [ -f "/etc/bind/$f" ]; then
+        cp -a "/etc/bind/$f" "$BACKUP/$f"
+    fi
+done
+
+if [ ! -f "$ZONE" ]; then
+    echo "ERROR: File zona nomor 11 tidak ditemukan: $ZONE"
+    exit 1
+fi
+
+# Ambil serial zona yang sekarang, kemudian naikkan satu.
+OLD_SERIAL=$(awk '
+    /SOA/ { inside=1; next }
+    inside && /^[[:space:]]*[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][[:space:]]*$/ {
+        gsub(/[[:space:]]/, "")
+        print
+        exit
+    }
+' "$ZONE")
+
+if [ -z "$OLD_SERIAL" ]; then
+    echo "ERROR: Nomor serial SOA tidak berhasil dibaca."
+    exit 1
+fi
+
+NEXT_SERIAL=$((OLD_SERIAL + 1))
+
+# Aktifkan recursive DNS melalui forwarder gateway.
+cat > /etc/bind/named.conf.options <<'OPTIONS'
+options {
+    directory "/var/cache/bind";
+    listen-on { any; };
+    listen-on-v6 { any; };
+
+    recursion yes;
+    allow-query { localhost; 192.233.0.0/16; };
+    allow-recursion { localhost; 192.233.0.0/16; };
+    allow-query-cache { localhost; 192.233.0.0/16; };
+
+    forwarders { 192.168.122.1; };
+    forward only;
+
+    dnssec-validation auto;
+};
+OPTIONS
+
+# Zona utama dan zona Reverse DNS.
+cat > /etc/bind/named.conf.local <<'LOCAL'
+zone "jujutsu.k44.com" {
+    type master;
+    file "/etc/bind/db.jujutsu.k44.com";
+    allow-transfer { 192.233.1.3; };
+    also-notify { 192.233.1.3; };
+};
+
+zone "1.233.192.in-addr.arpa" {
+    type master;
+    file "/etc/bind/db.192.233.1";
+    allow-transfer { 192.233.1.3; };
+    also-notify { 192.233.1.3; };
+};
+LOCAL
+
+# Zona forward: domain utama mengarah ke Gojo dan www menjadi CNAME.
+cat > "$ZONE" <<ZONEFILE
+\$TTL 86400
+@ IN SOA utahime.jujutsu.k44.com. admin.jujutsu.k44.com. (
+    $NEXT_SERIAL
+    3600
+    900
+    604800
+    86400
+)
+
+@       IN NS utahime.jujutsu.k44.com.
+@       IN NS shoko.jujutsu.k44.com.
+@       IN A  $GOJO_IP
+
+www     IN CNAME jujutsu.k44.com.
+utahime IN A 192.233.1.2
+shoko   IN A 192.233.1.3
+gojo    IN A $GOJO_IP
+
+sync-test IN TXT "dns-zone-sync-k44-v2"
+ZONEFILE
+
+# Zona reverse /24: IP Gojo dapat ditelusuri ke domain utama.
+cat > "$REV_FILE" <<REVFILE
+\$TTL 86400
+@ IN SOA utahime.jujutsu.k44.com. admin.jujutsu.k44.com. (
+    $NEXT_SERIAL
+    3600
+    900
+    604800
+    86400
+)
+
+@ IN NS utahime.jujutsu.k44.com.
+@ IN NS shoko.jujutsu.k44.com.
+$GOJO_LAST IN PTR jujutsu.k44.com.
+REVFILE
+
+echo "=== Pemeriksaan konfigurasi ==="
+named-checkconf
+named-checkzone "$DOMAIN" "$ZONE"
+named-checkzone "$REV_ZONE" "$REV_FILE"
+
+echo "=== Restart DNS Master ==="
+service named restart
+
+echo "=== Hasil uji lokal Master ==="
+dig @127.0.0.1 jujutsu.k44.com A +short
+dig @127.0.0.1 www.jujutsu.k44.com CNAME +short
+dig @127.0.0.1 -x "$GOJO_IP" +short
+
+echo "=== Nomor serial baru: $NEXT_SERIAL ==="
+echo "Backup konfigurasi lama: $BACKUP"
+echo "Skrip tersimpan: /root/soal-12.sh"
+EOF
+
+chmod +x /root/soal-12.sh
+/root/soal-12.sh
+
+#verif
+dig @127.0.0.1 jujutsu.k44.com A +short
+dig @127.0.0.1 www.jujutsu.k44.com CNAME +short
+dig @127.0.0.1 -x 192.233.1.4 +short
+
+#Konfig slave, shoko
+
+cat > /root/soal-12.sh <<'EOF'
+#!/bin/sh
+set -eu
+
+BACKUP="/root/soal-12"
+mkdir -p "$BACKUP"
+
+# Cadangkan konfigurasi sebelumnya.
+for f in named.conf.options named.conf.local; do
+    if [ -f "/etc/bind/$f" ]; then
+        cp -a "/etc/bind/$f" "$BACKUP/$f"
+    fi
+done
+
+if [ -f /var/cache/bind/db.jujutsu.k44.com ]; then
+    cp -a /var/cache/bind/db.jujutsu.k44.com \
+        "$BACKUP/db.jujutsu.k44.com.before"
+fi
+
+# Forwarder untuk pencarian domain internet.
+cat > /etc/bind/named.conf.options <<'OPTIONS'
+options {
+    directory "/var/cache/bind";
+    listen-on { any; };
+    listen-on-v6 { any; };
+
+    recursion yes;
+    allow-query { localhost; 192.233.0.0/16; };
+    allow-recursion { localhost; 192.233.0.0/16; };
+    allow-query-cache { localhost; 192.233.0.0/16; };
+
+    forwarders { 192.168.122.1; };
+    forward only;
+
+    dnssec-validation auto;
+};
+OPTIONS
+
+# Terima kedua zona dari DNS Master utahime.
+cat > /etc/bind/named.conf.local <<'LOCAL'
+zone "jujutsu.k44.com" {
+    type slave;
+    masters { 192.233.1.2; };
+    file "/var/cache/bind/db.jujutsu.k44.com";
+};
+
+zone "1.233.192.in-addr.arpa" {
+    type slave;
+    masters { 192.233.1.2; };
+    file "/var/cache/bind/db.1.233.192";
+};
+LOCAL
+
+named-checkconf
+service named restart
+
+echo "Skrip tersimpan: /root/soal-12.sh"
+echo "Backup konfigurasi: $BACKUP"
+EOF
+
+chmod +x /root/soal-12.sh
+/root/soal-12.sh
+
+#verif
+dig @127.0.0.1 jujutsu.k44.com SOA +short
+dig @127.0.0.1 jujutsu.k44.com A +short
+dig @127.0.0.1 www.jujutsu.k44.com CNAME +short
+dig @127.0.0.1 -x 192.233.1.4 +short
+
+#uji dri client (itadori)
+
+dig @192.233.1.2 jujutsu.k44.com A +short
+dig @192.233.1.2 www.jujutsu.k44.com CNAME +short
+dig @192.233.1.2 -x 192.233.1.4 +short
+
+#uji dri dns slave (shoko)
+
+dig @192.233.1.3 jujutsu.k44.com A +short
+dig @192.233.1.3 www.jujutsu.k44.com CNAME +short
+dig @192.233.1.3 -x 192.233.1.4 +short
+
+#Di client (itadori) uji dns 
+
+dig @192.233.1.2 google.com A +short
+dig @192.233.1.3 google.com A +short
+
+ping -c 4 google.com
+
+---
+
+## Soal 13
+
+#Konfig master di yaga
+
+cat > /root/soal-13.sh <<'EOF'
+#!/bin/sh
+set -eu
+
+DB="db_shibuya_k44"
+CONF="/etc/mysql/mariadb.conf.d/60-soal-13.cnf"
+BACKUP="/root/soal-13"
+
+# Pastikan yaga memiliki alamat pada Network 4.
+MASTER_IP=$(ip -4 -o addr show scope global |
+    awk '$4 ~ /^192\.233\.4\./ {
+        a=$4
+        sub(/\/.*/, "", a)
+        print a
+        exit
+    }')
+
+if [ -z "$MASTER_IP" ]; then
+    echo "ERROR: IP yaga pada 192.233.4.0/24 tidak ditemukan."
+    exit 1
+fi
+
+# Instal paket hanya jika MariaDB belum terpasang.
+if ! command -v mariadbd >/dev/null 2>&1; then
+    apt-get install -y mariadb-server mariadb-client
+fi
+
+mkdir -p "$BACKUP"
+
+# Simpan konfigurasi lama jika ada.
+if [ -f "$CONF" ] && [ ! -f "$BACKUP/60-soal-13.cnf.before" ]; then
+    cp -a "$CONF" "$BACKUP/60-soal-13.cnf.before"
+fi
+
+# Simpan konfigurasi Master di /root.
+cat > "$BACKUP/60-soal-13-master.cnf" <<'CNF'
+[mariadb]
+server-id=44
+log-bin=mariadb-bin
+binlog-format=ROW
+bind-address=0.0.0.0
+CNF
+
+# Pasang konfigurasi aktif.
+install -m 0644 "$BACKUP/60-soal-13-master.cnf" "$CONF"
+
+echo "=== Restart MariaDB Master ==="
+service mariadb restart
+
+echo "=== Buat database dan tabel ==="
+mariadb -uroot <<'SQL'
+CREATE DATABASE IF NOT EXISTS db_shibuya_k44;
+
+USE db_shibuya_k44;
+
+CREATE TABLE IF NOT EXISTS request_logs (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    method VARCHAR(10) DEFAULT NULL,
+    path VARCHAR(255) DEFAULT NULL,
+    client_ip VARCHAR(45) DEFAULT NULL,
+    status_code SMALLINT UNSIGNED DEFAULT NULL,
+    PRIMARY KEY (id)
+) ENGINE=InnoDB;
+
+CREATE USER IF NOT EXISTS
+    'repl_k44'@'192.233.4.%'
+    IDENTIFIED BY 'ReplK44_2026!';
+
+GRANT REPLICATION SLAVE ON *.*
+    TO 'repl_k44'@'192.233.4.%';
+
+CREATE USER IF NOT EXISTS
+    'app_k44'@'192.233.4.%'
+    IDENTIFIED BY 'AppK44_2026!';
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON db_shibuya_k44.*
+    TO 'app_k44'@'192.233.4.%';
+
+FLUSH PRIVILEGES;
+SQL
+
+echo "=== Verifikasi binary logging ==="
+mariadb -uroot -e \
+    "SHOW VARIABLES WHERE Variable_name IN ('server_id','log_bin','binlog_format');"
+
+echo "=== IP Master ==="
+echo "$MASTER_IP"
+
+echo "=== File dan posisi binary log Master ==="
+mariadb -uroot -e "SHOW MASTER STATUS\G"
+
+echo "Skrip: /root/soal-13.sh"
+echo "Konfigurasi: $BACKUP/60-soal-13-master.cnf"
+echo "Backup konfigurasi sebelumnya: $BACKUP"
+EOF
+
+chmod +x /root/soal-13.sh
+/root/soal-13.sh
+
+#Knfig slave di inumaki
+
+cat > /root/soal-13.sh <<'EOF'
+#!/bin/sh
+set -eu
+
+BACKUP="/root/soal-13"
+CONF="/etc/mysql/mariadb.conf.d/60-soal-13.cnf"
+
+# Minta alamat dan posisi binary log dari yaga.
+printf "Masukkan IP Master yaga: "
+IFS= read -r MASTER_IP
+
+printf "Masukkan File dari SHOW MASTER STATUS: "
+IFS= read -r MASTER_LOG_FILE
+
+printf "Masukkan Position dari SHOW MASTER STATUS: "
+IFS= read -r MASTER_LOG_POS
+
+# Validasi agar tidak salah menghubungkan jaringan.
+case "$MASTER_IP" in
+    192.233.4.*) ;;
+    *)
+        echo "ERROR: IP Master harus berada di Network 4 (192.233.4.0/24)."
+        exit 1
+        ;;
+esac
+
+case "$MASTER_LOG_FILE" in
+    mariadb-bin.*) ;;
+    *)
+        echo "ERROR: Periksa kembali nama File binary log dari yaga."
+        exit 1
+        ;;
+esac
+
+case "$MASTER_LOG_POS" in
+    ''|*[!0-9]*)
+        echo "ERROR: Position harus berupa angka."
+        exit 1
+        ;;
+esac
+
+if ! command -v mariadbd >/dev/null 2>&1; then
+    apt-get install -y mariadb-server mariadb-client
+fi
+
+mkdir -p "$BACKUP"
+
+if [ -f "$CONF" ] && [ ! -f "$BACKUP/60-soal-13.cnf.before" ]; then
+    cp -a "$CONF" "$BACKUP/60-soal-13.cnf.before"
+fi
+
+# Simpan konfigurasi Slave di /root.
+cat > "$BACKUP/60-soal-13-slave.cnf" <<'CNF'
+[mariadb]
+server-id=45
+relay-log=mariadb-relay-bin
+read-only=ON
+bind-address=0.0.0.0
+CNF
+
+install -m 0644 "$BACKUP/60-soal-13-slave.cnf" "$CONF"
+
+echo "=== Restart MariaDB Slave ==="
+service mariadb restart
+
+# Buat struktur awal yang sama dengan Master.
+mariadb -uroot <<'SQL'
+CREATE DATABASE IF NOT EXISTS db_shibuya_k44;
+
+USE db_shibuya_k44;
+
+CREATE TABLE IF NOT EXISTS request_logs (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    method VARCHAR(10) DEFAULT NULL,
+    path VARCHAR(255) DEFAULT NULL,
+    client_ip VARCHAR(45) DEFAULT NULL,
+    status_code SMALLINT UNSIGNED DEFAULT NULL,
+    PRIMARY KEY (id)
+) ENGINE=InnoDB;
+
+CREATE USER IF NOT EXISTS
+    'app_k44'@'192.233.4.%'
+    IDENTIFIED BY 'AppK44_2026!';
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON db_shibuya_k44.*
+    TO 'app_k44'@'192.233.4.%';
+
+FLUSH PRIVILEGES;
+SQL
+
+# Hubungkan Slave ke Master menggunakan file dan posisi yang dicatat.
+mariadb -uroot <<SQL
+STOP SLAVE;
+RESET SLAVE ALL;
+
+CHANGE MASTER TO
+    MASTER_HOST='$MASTER_IP',
+    MASTER_PORT=3306,
+    MASTER_USER='repl_k44',
+    MASTER_PASSWORD='ReplK44_2026!',
+    MASTER_LOG_FILE='$MASTER_LOG_FILE',
+    MASTER_LOG_POS=$MASTER_LOG_POS,
+    MASTER_CONNECT_RETRY=5;
+
+START SLAVE;
+SQL
+
+echo "=== Status replikasi Slave ==="
+mariadb -uroot -e "SHOW SLAVE STATUS\G"
+
+echo "Skrip: /root/soal-13.sh"
+echo "Konfigurasi: $BACKUP/60-soal-13-slave.cnf"
+echo "Backup konfigurasi sebelumnya: $BACKUP"
+EOF
+
+chmod +x /root/soal-13.sh
+/root/soal-13.sh
+
+#di yaga
+
+mariadb -uroot
+
+INSERT INTO db_shibuya_k44.request_logs
+    (method, path, client_ip, status_code)
+VALUES
+    ('TEST', '/soal-13-replikasi', '192.233.4.250', 200);
+
+SELECT *
+FROM db_shibuya_k44.request_logs
+WHERE path = '/soal-13-replikasi';
+
+exit;
+
+#cek data di slave inumaki
+
+mariadb -uroot -e "
+SELECT *
+FROM db_shibuya_k44.request_logs
+WHERE path = '/soal-13-replikasi';
+"
+
+#network 4, di inumaki
+
+mariadb --protocol=TCP -h 192.233.4.8 -u app_k44 -p
+
+pass : AppK44_2026!
+
+#jalanin
+
+SELECT COUNT(*) FROM db_shibuya_k44.request_logs;
+exit;
+
+---
+
+## Soal 14
+
+#Di Node yaga
+
+mariadb -u root
+
+SHOW DATABASES LIKE 'db_shibuya_k44';
+
+USE db_shibuya_k44;
+
+DESCRIBE request_logs;
+
+SELECT User, Host
+FROM mysql.user
+WHERE User = 'app_k44';
+
+#jalanin
+
+CREATE USER IF NOT EXISTS 'apiuser'@'192.233.4.%'
+IDENTIFIED BY 'ApiLab2026Change';
+
+ALTER USER 'apiuser'@'192.233.4.%'
+IDENTIFIED BY 'ApiLab2026Change';
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON db_shibuya_k44.*
+TO 'apiuser'@'192.233.4.%';
+
+FLUSH PRIVILEGES;
+
+EXIT;
+
+#di maki & panda buat =
+
+cat > /root/q14_frontend.sh <<'SCRIPT'
+#!/bin/bash
+set -Eeuo pipefail
+
+GROUP="k44"
+DOMAIN="jujutsu.${GROUP}.com"
+
+read -rp "Nama worker (maki/panda): " WORKER_NAME
+read -rp "IP Gojo pada Network 1: " GOJO_IP
+
+if [[ "$WORKER_NAME" != "maki" && "$WORKER_NAME" != "panda" ]]; then
+    echo "ERROR: Nama worker harus maki atau panda."
+    exit 1
+fi
+
+if [[ ! "$GOJO_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "ERROR: Format IP Gojo tidak valid."
+    exit 1
+fi
+
+echo "=== Instalasi frontend ==="
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    nginx php-fpm php-mysql
+
+# Set hostname agar hasil halaman sesuai nama node.
+printf '%s\n' "$WORKER_NAME" > /etc/hostname
+hostname "$WORKER_NAME"
+
+# Temukan service PHP-FPM yang terpasang.
+FPM_INIT="$(find /etc/init.d -maxdepth 1 \
+    -type f -name 'php*-fpm' -print -quit)"
+
+if [ -n "$FPM_INIT" ]; then
+    service "$(basename "$FPM_INIT")" restart
+fi
+
+PHP_SOCKET="$(find /run/php -maxdepth 1 \
+    -type s -name 'php*-fpm.sock' -print -quit)"
+
+if [ -z "$PHP_SOCKET" ]; then
+    echo "ERROR: Socket PHP-FPM tidak ditemukan."
+    ls -la /run/php/ || true
+    exit 1
+fi
+
+mkdir -p /root/backup-q14 /var/www/html
+
+# Backup default site jika belum pernah disimpan.
+if [ -f /etc/nginx/sites-available/default ] &&
+   [ ! -f /root/backup-q14/nginx-default.before ]; then
+    cp -a /etc/nginx/sites-available/default \
+        /root/backup-q14/nginx-default.before
+fi
+
+# Halaman frontend yang menampilkan hostname.
+cat > /var/www/html/index.php <<'PHP'
+<?php
+header('Content-Type: text/plain; charset=utf-8');
+echo "Frontend worker: " . gethostname() . PHP_EOL;
+PHP
+
+# Virtual host frontend.
+cat > /etc/nginx/sites-available/q14-frontend <<NGINX
+server {
+    listen 80 default_server;
+    server_name ${DOMAIN} www.${DOMAIN};
+
+    root /var/www/html;
+    index index.php index.html;
+
+    # Hanya Gojo yang boleh mengakses frontend worker.
+    allow ${GOJO_IP};
+    deny all;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php\$ {
+        try_files \$uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_pass unix:${PHP_SOCKET};
+    }
+}
+NGINX
+
+rm -f /etc/nginx/sites-enabled/default
+ln -sfn /etc/nginx/sites-available/q14-frontend \
+    /etc/nginx/sites-enabled/q14-frontend
+
+chown -R www-data:www-data /var/www/html
+
+echo "=== Validasi dan restart Nginx ==="
+php -l /var/www/html/index.php
+nginx -t
+service nginx restart
+service nginx status
+
+echo "Frontend ${WORKER_NAME} selesai dikonfigurasi."
+SCRIPT
+
+bash /root/q14_frontend.sh
+
+# uji di node gojo
+
+curl -i -H "Host: jujutsu.k44.com" http://IP_MAKI/
+curl -i -H "Host: www.jujutsu.k44.com" http://IP_PANDA/
+
+# buat script di nanami , todo, kirara 
+
+cat > /root/q14_api_worker.sh <<'SCRIPT'
+#!/bin/bash
+set -Eeuo pipefail
+
+GROUP="k44"
+DOMAIN="jujutsu.${GROUP}.com"
+DB_NAME="db_shibuya_${GROUP}"
+DB_USER="apiuser"
+
+read -rp "Nama worker (nanami/todo/kirara): " WORKER_NAME
+read -rp "IP Geto pada Network 4: " GETO_IP
+read -rp "IP Yaga pada Network 4: " YAGA_IP
+read -rsp "Password apiuser pada Yaga: " DB_PASSWORD
+echo
+
+case "$WORKER_NAME" in
+    nanami|todo|kirara) ;;
+    *)
+        echo "ERROR: Nama worker harus nanami, todo, atau kirara."
+        exit 1
+        ;;
+esac
+
+for IP_VALUE in "$GETO_IP" "$YAGA_IP"; do
+    if [[ ! "$IP_VALUE" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        echo "ERROR: Format IP tidak valid: $IP_VALUE"
+        exit 1
+    fi
+done
+
+# Gunakan password yang sama dengan akun di Yaga.
+# Base64 menghindari masalah kutip saat menulis konfigurasi PHP.
+DB_PASSWORD_B64="$(printf '%s' "$DB_PASSWORD" | base64 | tr -d '\n')"
+unset DB_PASSWORD
+
+echo "=== Instalasi API worker ==="
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    nginx php-fpm php-mysql
+
+# Set hostname agar log menunjukkan worker yang benar.
+printf '%s\n' "$WORKER_NAME" > /etc/hostname
+hostname "$WORKER_NAME"
+
+FPM_INIT="$(find /etc/init.d -maxdepth 1 \
+    -type f -name 'php*-fpm' -print -quit)"
+
+if [ -n "$FPM_INIT" ]; then
+    service "$(basename "$FPM_INIT")" restart
+fi
+
+PHP_SOCKET="$(find /run/php -maxdepth 1 \
+    -type s -name 'php*-fpm.sock' -print -quit)"
+
+if [ -z "$PHP_SOCKET" ]; then
+    echo "ERROR: Socket PHP-FPM tidak ditemukan."
+    ls -la /run/php/ || true
+    exit 1
+fi
+
+mkdir -p /root/backup-q14 /var/www/api
+
+if [ -f /etc/nginx/sites-available/default ] &&
+   [ ! -f /root/backup-q14/nginx-default.before ]; then
+    cp -a /etc/nginx/sites-available/default \
+        /root/backup-q14/nginx-default.before
+fi
+
+# Konfigurasi koneksi database.
+cat > /var/www/api/config.php <<PHP_CONFIG
+<?php
+return [
+    'host' => '${YAGA_IP}',
+    'database' => '${DB_NAME}',
+    'username' => '${DB_USER}',
+    'password' => base64_decode('${DB_PASSWORD_B64}'),
+];
+PHP_CONFIG
+
+unset DB_PASSWORD_B64
+
+# Endpoint API yang mencatat request ke database.
+cat > /var/www/api/index.php <<'PHP'
+<?php
+
+header('Content-Type: application/json; charset=utf-8');
+
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+$path = parse_url(
+    $_SERVER['REQUEST_URI'] ?? '/',
+    PHP_URL_PATH
+) ?: '/';
+
+$worker = gethostname();
+$clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+$statusCode = 200;
+
+try {
+    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+
+    $cfg = require __DIR__ . '/config.php';
+
+    $db = new mysqli(
+        $cfg['host'],
+        $cfg['username'],
+        $cfg['password'],
+        $cfg['database']
+    );
+
+    $db->set_charset('utf8mb4');
+
+    $stmt = $db->prepare(
+        'INSERT INTO request_logs
+         (method, path, client_ip, worker, status_code)
+         VALUES (?, ?, ?, ?, ?)'
+    );
+
+    $stmt->bind_param(
+        'ssssi',
+        $method,
+        $path,
+        $clientIp,
+        $worker,
+        $statusCode
+    );
+
+    $stmt->execute();
+    $stmt->close();
+    $db->close();
+
+    echo json_encode([
+        'status' => 'ok',
+        'worker' => $worker,
+        'path' => $path,
+        'client_ip' => $clientIp
+    ], JSON_UNESCAPED_SLASHES), PHP_EOL;
+
+} catch (Throwable $e) {
+    error_log($e->getMessage());
+    http_response_code(500);
+
+    echo json_encode([
+        'status' => 'error',
+        'message' => 'Database logging failed'
+    ], JSON_UNESCAPED_SLASHES), PHP_EOL;
+}
+PHP
+
+# Virtual host API.
+cat > /etc/nginx/sites-available/q14-api <<NGINX
+server {
+    listen 80 default_server;
+    server_name ${DOMAIN} www.${DOMAIN} api.${DOMAIN};
+
+    root /var/www/api;
+    index index.php;
+
+    # Hanya Geto yang boleh mengakses API worker.
+    allow ${GETO_IP};
+    deny all;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php\$ {
+        try_files \$uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_pass unix:${PHP_SOCKET};
+    }
+}
+NGINX
+
+rm -f /etc/nginx/sites-enabled/default
+ln -sfn /etc/nginx/sites-available/q14-api \
+    /etc/nginx/sites-enabled/q14-api
+
+chown -R www-data:www-data /var/www/api
+chmod 640 /var/www/api/config.php
+
+echo "=== Validasi konfigurasi ==="
+php -l /var/www/api/config.php
+php -l /var/www/api/index.php
+php -m | grep -i mysqli
+nginx -t
+
+service nginx restart
+service nginx status
+
+echo "API worker ${WORKER_NAME} selesai dikonfigurasi."
+SCRIPT
+
+bash /root/q14_api_worker.sh
+
+# uji hasil API di geto
+
+curl -i -H "Host: jujutsu.k44.com" http://IP_NANAMI/api
+curl -i -H "Host: jujutsu.k44.com" http://IP_TODO/api
+curl -i -H "Host: jujutsu.k44.com" http://IP_KIRARA/api
+
+# dari salah satu klien di network 2 / 3
+
+curl -i http://IP_MAKI/
+curl -i http://IP_PANDA/
+
+curl -i http://IP_NANAMI/api
+curl -i http://IP_TODO/api
+curl -i http://IP_KIRARA/api
+
+---
+
+## SOAL 15
+
+# Di node nanami & todo
+
+cat << 'EOF' > /var/www/html/index.php
+<?php
+header('Content-Type: application/json');
+echo json_encode([
+    "worker" => "nanami" // ganti sesuai nama node (nanami, todo)
+    "hostname" => gethostname(),
+    "status" => "API Active"
+]) . "\n";
+?>
+EOF
+
+#jalankkan
+
+cat << 'EOF' > /etc/nginx/sites-available/default
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    root /var/www/html;
+    index index.php index.html index.htm;
+
+    server_name _;
+
+    # Pembatasan akses (Hanya localhost dan Geto yang diizinkan)
+    allow 127.0.0.1;
+    allow 192.233.4.2;
+    deny all;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php8.4-fpm.sock;
+    }
+}
+EOF
+
+# uji
+
+nginx -t && service nginx restart
+curl -i http://localhost/
+
+# Di geto 
+
+apt-get update
+apt-get install -y nginx curl
+
+rm -f /etc/nginx/sites-enabled/default
+
+# konfig
+
+cat << 'EOF' > /etc/nginx/sites-available/api_cluster
+upstream api_cluster {
+    # nanami menerima beban 3x lebih banyak dibanding todo
+    server 192.233.4.5:80 weight=3;
+    server 192.233.4.6:80 weight=1;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Timeout koneksi agar responsif
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 10s;
+    }
+}
+EOF
+
+# aktifkan
+
+ln -sf /etc/nginx/sites-available/api_cluster /etc/nginx/sites-enabled/
+nginx -t
+service nginx restart
+
+# tes di inumaki
+
+for i in {1..20}; do
+    curl -s http://192.233.4.2/
+done
+
+# tes 2
+
+for i in {1..40}; do
+    curl -s http://192.233.4.2/ | grep -o '"worker":"[^"]*"'
+done | sort | uniq -c
+
+--- 
+
+## SOAL 16
+
+# Di Maki
+
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+mkdir -p /var/www/html
+apt-get update && apt-get install -y nginx curl
+
+# Buat halaman frontend Maki
+cat << 'EOF' > /var/www/html/index.html
+Frontend Response: MAKI (Worker Frontend 1)
+EOF
+
+# Izinkan localhost dan Gojo (192.233.1.4), tolak akses langsung lainnya
+cat << 'EOF' > /etc/nginx/sites-available/default
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    root /var/www/html;
+    index index.html index.htm;
+    server_name _;
+
+    allow 127.0.0.1;
+    allow ::1;
+    allow 192.233.1.4; # Ganti dengan IP Gojo Anda
+    deny all;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+
+nginx -t && service nginx restart
+
+# di panda
+
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+mkdir -p /var/www/html
+apt-get update && apt-get install -y nginx curl
+
+# Buat halaman frontend Panda
+cat << 'EOF' > /var/www/html/index.html
+Frontend Response: PANDA (Worker Frontend 2)
+EOF
+
+# Izinkan localhost dan Gojo (192.233.1.4), tolak akses langsung lainnya
+cat << 'EOF' > /etc/nginx/sites-available/default
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    root /var/www/html;
+    index index.html index.htm;
+    server_name _;
+
+    allow 127.0.0.1;
+    allow ::1;
+    allow 192.233.1.4; # Ganti dengan IP Gojo Anda
+    deny all;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+
+nginx -t && service nginx restart
+
+# di gojo 
+
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update
+apt-get install -y nginx curl
+
+rm -f /etc/nginx/sites-enabled/default
+
+# konfig
+
+cat << 'EOF' > /etc/nginx/sites-available/jujutsu
+# Upstream Frontend: Round Robin maki & panda
+upstream frontend_cluster {
+    server 192.233.4.3:80; # IP maki
+    server 192.233.4.4:80; # IP panda
+}
+
+# Upstream API: Load Balancer Geto
+upstream api_backend {
+    server 192.233.4.2:80; # IP geto
+}
+
+server {
+    listen 80;
+    server_name jujutsu.k44.com www.jujutsu.k44.com;
+
+    # 1. Routing Root (/) ke Worker Frontend (Round Robin Maki/Panda)
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 2. Routing Path /api ke Internal Load Balancer Geto
+    location /api {
+        rewrite ^/api/?(.*)$ /$1 break;
+        proxy_pass http://api_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+# aktifkan
+
+ln -sf /etc/nginx/sites-available/jujutsu /etc/nginx/sites-enabled/
+nginx -t
+service nginx restart
+
+# pengujian dri ino
+
+for i in {1..6}; do
+    curl -s http://jujutsu.k44.com/
+done
+
+
+for i in {1..8}; do
+    curl -s http://jujutsu.k44.com/api
+done
+
+---
+
+# masuk ke consol mariaDB di yaga
+
+mariadb -u root -p
+
+USE db_shibuya_k44;
+
+-- Buat tabel request_logs jika belum ada
+CREATE TABLE IF NOT EXISTS request_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    client_ip VARCHAR(45) NOT NULL,
+    worker VARCHAR(50),
+    endpoint VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Pastikan user app_k44 memiliki izin akses dari seluruh Network 4
+GRANT ALL PRIVILEGES ON db_shibuya_k44.* TO 'app_k44'@'192.233.4.%' IDENTIFIED BY 'AppK44_2026!';
+FLUSH PRIVILEGES;
+EXIT;
+
+# di gojo 
+
+cat << 'EOF' > /etc/nginx/sites-available/jujutsu
+upstream frontend_cluster {
+    server 192.233.4.3:80;
+    server 192.233.4.4:80;
+}
+
+upstream api_backend {
+    server 192.233.4.2:80;
+}
+
+server {
+    listen 80;
+    server_name jujutsu.k44.com www.jujutsu.k44.com;
+
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /api {
+        rewrite ^/api/?(.*)$ /$1 break;
+        proxy_pass http://api_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+nginx -t && service nginx reload
+
+# di geto
+
+cat << 'EOF' > /etc/nginx/sites-available/api_cluster
+upstream api_cluster {
+    server 192.233.4.5:80 weight=3;
+    server 192.233.4.6:80 weight=1;
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    # Hanya percaya header IP dari IP node Gojo (192.233.1.4)
+    set_real_ip_from 192.233.1.4;
+    set_real_ip_from 192.233.1.0/24;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        # Meneruskan IP asli yang sudah divalidasi ke worker backend
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+nginx -t && service nginx restart
+
+# di node nanami & todo
+
+cat << 'EOF' > /var/www/html/index.php
+<?php
+header('Content-Type: application/json');
+
+// Mengambil IP asli dari header yang diteruskan proxy
+$client_ip = $_SERVER['REMOTE_ADDR'];
+if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+    $client_ip = $_SERVER['HTTP_X_REAL_IP'];
+} elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+    $ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+    $client_ip = trim($ips[0]);
+}
+
+$worker_name = "nanami";
+$db_host = "192.233.4.11"; // Ganti jika IP yaga berbeda
+$db_user = "app_k44";
+$db_pass = "AppK44_2026!";
+$db_name = "db_shibuya_k44";
+
+$db_status = "unrecorded";
+
+try {
+    $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8", $db_user, $db_pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_TIMEOUT => 3
+    ]);
+
+    $stmt = $pdo->prepare("INSERT INTO request_logs (client_ip, worker, endpoint) VALUES (:ip, :worker, :endpoint)");
+    $stmt->execute([
+        ':ip' => $client_ip,
+        ':worker' => $worker_name,
+        ':endpoint' => $_SERVER['REQUEST_URI']
+    ]);
+    $db_status = "logged_successfully";
+} catch (Exception $e) {
+    $db_status = "error: " . $e->getMessage();
+}
+
+echo json_encode([
+    "worker" => $worker_name,
+    "hostname" => gethostname(),
+    "recorded_client_ip" => $client_ip,
+    "database_logging" => $db_status
+], JSON_PRETTY_PRINT) . "\n";
+?>
+EOF
+
+chmod 644 /var/www/html/index.php
+/etc/init.d/php8.4-fpm restart
+chmod 777 /var/run/php/php8.4-fpm.sock
+
+# validasi di itadori & ino
+
+ip -4 a show eth0
+curl -s http://jujutsu.k44.com/api
+
+# cek di yaga
+
+mariadb -u app_k44 -p'AppK44_2026!' -e "USE db_shibuya_k44; SELECT id, client_ip, worker, endpoint, created_at FROM request_logs ORDER BY id DESC LIMIT 10;"
+
+---
+
+## Soal 18
+
+# DI kirara
+
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+rm -f /etc/apt/sources.list.d/*.sources 2>/dev/null
+
+cat << 'EOF' > /etc/apt/sources.list
+deb [trusted=yes] http://deb.debian.org/debian trixie main
+deb [trusted=yes] http://deb.debian.org/debian trixie-updates main
+EOF
+echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
+
+apt-get update
+apt-get install -y nginx php-fpm php-mysql curl
+
+# buat skrip API
+
+mkdir -p /var/www/html
+
+cat << 'EOF' > /var/www/html/index.php
+<?php
+header('Content-Type: application/json');
+
+$client_ip = $_SERVER['REMOTE_ADDR'];
+if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+    $client_ip = $_SERVER['HTTP_X_REAL_IP'];
+} elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+    $ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+    $client_ip = trim($ips[0]);
+}
+
+$worker_name = "kirara";
+$db_host = "192.233.4.11"; // Ganti jika IP yaga berbeda
+$db_user = "app_k44";
+$db_pass = "AppK44_2026!";
+$db_name = "db_shibuya_k44";
+
+$db_status = "unrecorded";
+
+try {
+    $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8", $db_user, $db_pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_TIMEOUT => 3
+    ]);
+
+    $stmt = $pdo->prepare("INSERT INTO request_logs (client_ip, worker, endpoint) VALUES (:ip, :worker, :endpoint)");
+    $stmt->execute([
+        ':ip' => $client_ip,
+        ':worker' => $worker_name,
+        ':endpoint' => $_SERVER['REQUEST_URI']
+    ]);
+    $db_status = "logged_successfully";
+} catch (Exception $e) {
+    $db_status = "error: " . $e->getMessage();
+}
+
+echo json_encode([
+    "worker" => $worker_name,
+    "hostname" => gethostname(),
+    "recorded_client_ip" => $client_ip,
+    "database_logging" => $db_status
+], JSON_PRETTY_PRINT) . "\n";
+?>
+EOF
+
+chmod 644 /var/www/html/index.php
+
+# konfig nginx virtual host
+
+/etc/init.d/php*-fpm restart
+SOCK=$(ls /var/run/php/php*-fpm.sock 2>/dev/null | head -n 1)
+
+cat << EOF > /etc/nginx/sites-available/default
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    root /var/www/html;
+    index index.php index.html index.htm;
+    server_name _;
+
+    # Access control: Hanya localhost dan geto
+    allow 127.0.0.1;
+    allow ::1;
+    allow 192.233.4.2;
+    deny all;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+
+    location ~ \.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$SOCK;
+    }
+}
+EOF
+
+chmod 777 $SOCK 2>/dev/null
+nginx -t && service nginx restart
+
+# uji
+
+curl -i http://localhost/
+
+# Di geto perbarui konfg VH
+
+cat << 'EOF' > /etc/nginx/sites-available/api_cluster
+upstream api_cluster {
+    # Worker API utama dengan Passive Health Check
+    server 192.233.4.5:80 weight=3 max_fails=2 fail_timeout=5s;
+    server 192.233.4.6:80 weight=1 max_fails=2 fail_timeout=5s;
+
+    # Worker API cadangan (hanya aktif jika kedua server utama down)
+    server 192.233.4.7:80 backup;
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    # Real-IP dari reverse proxy Gojo
+    set_real_ip_from 192.233.1.4;
+    set_real_ip_from 192.233.1.0/24;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Pengalihan instan ke backup jika server utama error/down
+        proxy_next_upstream error timeout invalid_header http_500 http_502 http_503 http_504;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 3s;
+    }
+}
+EOF
+
+# validasi 
+
+nginx -t
+service nginx restart
+
+# perbarui skrip
+
+cat << 'EOF' > /root/setup_lb.sh
+#!/bin/bash
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+nginx -t && service nginx restart
+echo "Internal Load Balancer Geto aktif dengan konfigurasi High Availability (Kirara backup)."
+EOF
+chmod +x /root/setup_lb.sh
+
+# uji dari itadori
+
+for i in {1..8}; do
+    curl -s http://jujutsu.k44.com/api | grep '"worker"'
+done
+
+# matikan nginx di nanami dan todo
+
+service nginx stop
+
+# di itadori
+
+curl -i http://jujutsu.k44.com/api
+
+for i in {1..5}; do
+    curl -s http://jujutsu.k44.com/api | grep '"worker"'
+done
+
+# nyalain nginx
+
+service nginx start
+
+# dari itadori
+
+for i in {1..8}; do
+ curl -s http://jujutsu.k44.com/api | grep '"worker"'
+done
+
+# cek log yaga
+
+mariadb -u app_k44 -p'AppK44_2026!' -e "USE db_shibuya_k44; SELECT id, client_ip, worker, endpoint, created_at FROM request_logs ORDER BY id DESC LIMIT 10;"
+
+---
+
+## SOAL 19
+
+# Di gojo
+
+mkdir -p /var/cache/nginx/jujutsu_cache
+chown -R www-data:www-data /var/cache/nginx
+
+# konfig
+
+cat << 'EOF' > /etc/nginx/sites-available/jujutsu
+# 1. Deklarasi Cache Path: masa simpan 10 menit di memori zone, storage 100m
+proxy_cache_path /var/cache/nginx/jujutsu_cache levels=1:2 keys_zone=jujutsu_cache:10m inactive=60m max_size=100m;
+
+# 2. Deklarasi Rate Limiting: 10 request/detik per IP klien ($binary_remote_addr)
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+
+# Upstream Frontend (Maki & Panda)
+upstream frontend_cluster {
+    server 192.233.4.3:80;
+    server 192.233.4.4:80;
+}
+
+# Upstream API (Internal LB Geto)
+upstream api_backend {
+    server 192.233.4.2:80;
+}
+
+server {
+    listen 80;
+    server_name jujutsu.k44.com www.jujutsu.k44.com;
+
+    # ==========================================
+    # Web Frontend (Root /) dengan Proxy Caching
+    # ==========================================
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Konfigurasi Cache 10 Menit
+        proxy_cache jujutsu_cache;
+        proxy_cache_valid 200 302 10m;
+        proxy_cache_valid any 1m;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+
+        # Pastikan Nginx meng-cache konten statis & dinamis frontend
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+
+        # Header verifikasi status cache (MISS / HIT)
+        add_header X-Cache-Status $upstream_cache_status;
+    }
+
+    # ==========================================
+    # API Backend (/api) dengan Rate Limiting 10r/s
+    # ==========================================
+    location /api {
+        # Batasi 10 req/s, toleransi burst 10 request instan tanpa delay
+        limit_req zone=api_limit burst=10 nodelay;
+
+        rewrite ^/api/?(.*)$ /$1 break;
+        proxy_pass http://api_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+# validasi
+
+nginx -t
+service nginx restart
+
+# di gojo
+
+cat << 'EOF' > /root/setup_proxy.sh
+#!/bin/bash
+
+# Setup Resolver & Direktori Cache
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+mkdir -p /var/cache/nginx/jujutsu_cache
+chown -R www-data:www-data /var/cache/nginx
+
+# Bersihkan default site
+rm -f /etc/nginx/sites-enabled/default
+
+# Tulis konfigurasi jujutsu
+cat << 'CONF' > /etc/nginx/sites-available/jujutsu
+proxy_cache_path /var/cache/nginx/jujutsu_cache levels=1:2 keys_zone=jujutsu_cache:10m inactive=60m max_size=100m;
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+
+upstream frontend_cluster {
+    server 192.233.4.3:80;
+    server 192.233.4.4:80;
+}
+
+upstream api_backend {
+    server 192.233.4.2:80;
+}
+
+server {
+    listen 80;
+    server_name jujutsu.k44.com www.jujutsu.k44.com;
+
+    location / {
+        proxy_pass http://frontend_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_cache jujutsu_cache;
+        proxy_cache_valid 200 302 10m;
+        proxy_cache_valid any 1m;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        add_header X-Cache-Status $upstream_cache_status;
+    }
+
+    location /api {
+        limit_req zone=api_limit burst=10 nodelay;
+
+        rewrite ^/api/?(.*)$ /$1 break;
+        proxy_pass http://api_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+CONF
+
+ln -sf /etc/nginx/sites-available/jujutsu /etc/nginx/sites-enabled/
+nginx -t && service nginx restart
+echo "Proxy Gojo (Caching & Rate Limiting) siap digunakan."
+EOF
+
+chmod +x /root/setup_proxy.sh
+
+# uji proxy caching dari itadori
+
+curl -i http://jujutsu.k44.com/ | grep -E "HTTP|X-Cache-Status|Frontend"
+
+# HIT
+
+curl -i http://jujutsu.k44.com/ | grep -E "HTTP|X-Cache-Status|Frontend"
+
+# uji normal di itadori
+
+curl -s -o /dev/null -w "%{http_code}\n" http://jujutsu.k44.com/api
+curl -s -o /dev/null -w "%{http_code}\n" http://jujutsu.k44.com/api
+curl -s -o /dev/null -w "%{http_code}\n" http://jujutsu.k44.com/api
+
+# uji flooding
+
+for i in {1..25}; do
+    curl -s -o /dev/null -w "Req $i: HTTP Status %{http_code}\n" http://jujutsu.k44.com/api
+done
+
+# verif log penolakan di gojo
+
+tail -n 10 /var/log/nginx/error.log
+
+
+---
+
+# Di node kusakabe, konfig jaringan
+
+# 1. Pasang IP statis jika belum dapat DHCP
+ip addr add 192.233.3.15/24 dev eth0 2>/dev/null
+ip link set eth0 up
+ip route add default via 192.233.3.1 2>/dev/null
+
+# 2. Set resolver internet agar bisa mengunduh paket
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# 3. Daftarkan domain jujutsu ke IP Gojo (192.233.1.4)
+grep -q "jujutsu.k44.com" /etc/hosts || echo "192.233.1.4 jujutsu.k44.com www.jujutsu.k44.com" >> /etc/hosts
+
+# pasang tool ab
+
+apk update
+apk add apache2-utils curl
+
+# uji web frontend di kusakabe
+
+ab -n 600 -c 30 http://jujutsu.k44.com/
+
+# uji endpoint api di kusakabe
+
+ab -n 600 -c 30 http://jujutsu.k44.com/api
+
+# cek log di gojo
+
+awk '{print $9}' /var/log/nginx/access.log | sort | uniq -c
+
+# periksa bukti blokir
+
+grep "limiting requests" /var/log/nginx/error.log | tail -n 5
+
