@@ -1155,10 +1155,6 @@ cat /var/lib/dhcp/dhcpd.leases
 
 ---
 
-Berikut adalah draf laporan untuk **Soal 8** sesuai dengan template Markdown yang digunakan:
-
----
-
 ## Soal 8: Analisis Packet Capture Transaksi DHCP (DORA) dan Verifikasi Field Gateway IP (giaddr)
 
 ### Ringkasan Soal
